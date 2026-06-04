@@ -97,22 +97,14 @@ export async function introspectMysql(
     const statsByTable = groupBy(statRows, (r) => str(r.TABLE_NAME));
     const fksByTable = groupBy(fkRows, (r) => str(r.TABLE_NAME));
 
-    const tableNames = tableRows.map((r) => str(r.TABLE_NAME));
-
-    const tables: DbTable[] = tableRows.map((t) => {
+    // First pass: structural facts per table (no inference yet).
+    const prelim: PrelimTable[] = tableRows.map((t) => {
       const name = str(t.TABLE_NAME);
       const columns = buildColumns(columnsByTable.get(name) ?? []);
       const { indexes, primaryKey } = buildIndexes(
         statsByTable.get(name) ?? [],
       );
       const declaredFks = buildForeignKeys(fksByTable.get(name) ?? []);
-      const inferredFks = inferForeignKeys(
-        name,
-        columns,
-        tableNames,
-        declaredFks,
-      );
-
       return {
         name,
         engine: strOrNull(t.ENGINE),
@@ -122,9 +114,26 @@ export async function introspectMysql(
         columns,
         primaryKey,
         indexes,
-        foreignKeys: [...declaredFks, ...inferredFks],
+        declaredFks,
       };
     });
+
+    // Build a prefix-aware lookup so FK inference works on schemas where every
+    // table shares a platform prefix (e.g. PyroCMS "default_", "core_").
+    const index = buildTableIndex(prelim);
+
+    // Second pass: add heuristically inferred FKs.
+    const tables: DbTable[] = prelim.map((t) => ({
+      name: t.name,
+      engine: t.engine,
+      collation: t.collation,
+      estimatedRows: t.estimatedRows,
+      comment: t.comment,
+      columns: t.columns,
+      primaryKey: t.primaryKey,
+      indexes: t.indexes,
+      foreignKeys: [...t.declaredFks, ...inferForeignKeys(t, index)],
+    }));
 
     const schema: DbSchema = {
       schemaVersion: DB_SCHEMA_VERSION,
@@ -227,40 +236,143 @@ function buildForeignKeys(rows: Row[]): DbForeignKey[] {
   return fks;
 }
 
+/** A table's structural facts, before FK inference. */
+interface PrelimTable {
+  name: string;
+  engine: string | null;
+  collation: string | null;
+  estimatedRows: number | null;
+  comment: string;
+  columns: DbColumn[];
+  primaryKey: string[];
+  indexes: DbIndex[];
+  declaredFks: DbForeignKey[];
+}
+
+interface IndexedTable {
+  actual: string;
+  pk: string[];
+}
+
+interface TableIndex {
+  /** normalized (prefix-stripped, lowercased) name -> matching tables */
+  lookup: Map<string, IndexedTable[]>;
+  /** platform prefixes detected in the schema, e.g. ["default_", "core_"] */
+  prefixes: string[];
+}
+
+/** Prefixes (first underscore-delimited segment + "_") shared by >= 3 tables. */
+function detectPrefixes(names: string[]): string[] {
+  const counts = new Map<string, number>();
+  for (const n of names) {
+    const i = n.indexOf("_");
+    if (i > 0) {
+      const p = n.slice(0, i + 1).toLowerCase();
+      counts.set(p, (counts.get(p) ?? 0) + 1);
+    }
+  }
+  return [...counts.entries()]
+    .filter(([, c]) => c >= 3)
+    .map(([p]) => p)
+    // longest first so the most specific prefix strips
+    .sort((a, b) => b.length - a.length);
+}
+
+function buildTableIndex(tables: PrelimTable[]): TableIndex {
+  const prefixes = detectPrefixes(tables.map((t) => t.name));
+  const lookup = new Map<string, IndexedTable[]>();
+
+  const add = (key: string, entry: IndexedTable) => {
+    const k = key.toLowerCase();
+    if (!k) return;
+    const list = lookup.get(k) ?? [];
+    list.push(entry);
+    lookup.set(k, list);
+  };
+
+  for (const t of tables) {
+    const entry: IndexedTable = { actual: t.name, pk: t.primaryKey };
+    const lower = t.name.toLowerCase();
+    add(lower, entry);
+    for (const p of prefixes) {
+      if (lower.startsWith(p)) {
+        add(lower.slice(p.length), entry);
+        break;
+      }
+    }
+  }
+
+  return { lookup, prefixes };
+}
+
+function prefixOf(name: string, prefixes: string[]): string | undefined {
+  const lower = name.toLowerCase();
+  return prefixes.find((p) => lower.startsWith(p));
+}
+
+function singular(s: string): string {
+  if (s.endsWith("ies")) return s.slice(0, -3) + "y";
+  if (s.endsWith("es")) return s.slice(0, -2);
+  if (s.endsWith("s")) return s.slice(0, -1);
+  return s;
+}
+
 /**
- * Heuristically infer foreign keys that the schema does not declare — common in
- * legacy databases. Strategy: a single-column `<x>_id` or `<x>Id` whose `<x>`
- * (singular or pluralised) matches a real table name, and which is not already
- * covered by a declared FK. These are hypotheses, flagged origin "inferred".
+ * Heuristically infer foreign keys the schema does not declare — common in
+ * legacy databases. A single-column `<base>_id` whose `<base>` (singular or
+ * pluralised) resolves to exactly one real table is treated as an FK.
+ *
+ * Prefix-aware: platform prefixes (e.g. "default_", "core_") are stripped when
+ * matching, and when a base is ambiguous across prefixes (default_users vs
+ * core_users) the target sharing the source table's prefix is preferred. The
+ * referenced column is the target's actual primary key, not an assumed "id".
+ *
+ * These are hypotheses, flagged origin "inferred" — to be verified, not trusted.
  */
 function inferForeignKeys(
-  table: string,
-  columns: DbColumn[],
-  tableNames: string[],
-  declared: DbForeignKey[],
+  table: PrelimTable,
+  index: TableIndex,
 ): DbForeignKey[] {
-  const declaredCols = new Set(declared.flatMap((fk) => fk.columns));
-  const tableSet = new Set(tableNames.map((t) => t.toLowerCase()));
+  const declaredCols = new Set(table.declaredFks.flatMap((fk) => fk.columns));
+  const srcPrefix = prefixOf(table.name, index.prefixes);
   const inferred: DbForeignKey[] = [];
 
-  for (const col of columns) {
+  for (const col of table.columns) {
     if (declaredCols.has(col.name)) continue;
 
-    const m = col.name.match(/^(.*?)[_]?(?:id|Id|ID)$/);
+    const lc = col.name.toLowerCase();
+    if (lc === "id") continue;
+    const m = lc.match(/^(.*?)_?id$/);
     if (!m || !m[1]) continue;
-    const base = m[1].replace(/_$/, "").toLowerCase();
-    if (!base) continue;
+    const base = m[1];
 
-    const candidates = [base, `${base}s`, `${base}es`];
-    const target = candidates.find((c) => tableSet.has(c));
-    if (!target || target === table.toLowerCase()) continue;
+    const candidates = [...new Set([base, `${base}s`, `${base}es`, singular(base)])].filter(Boolean);
 
-    const actualTable = tableNames.find((t) => t.toLowerCase() === target)!;
+    let match: IndexedTable | undefined;
+    for (const cand of candidates) {
+      const hits = (index.lookup.get(cand) ?? []).filter(
+        (h) => h.actual.toLowerCase() !== table.name.toLowerCase(),
+      );
+      if (hits.length === 0) continue;
+      if (hits.length === 1) {
+        match = hits[0];
+      } else if (srcPrefix) {
+        // disambiguate by preferring a target with the same platform prefix
+        const sameP = hits.filter((h) =>
+          h.actual.toLowerCase().startsWith(srcPrefix),
+        );
+        if (sameP.length === 1) match = sameP[0];
+      }
+      if (match) break;
+    }
+    if (!match) continue;
+
+    const refCol = match.pk.length === 1 ? match.pk[0] : "id";
     inferred.push({
-      name: `inferred_${table}_${col.name}`,
+      name: `inferred_${table.name}_${col.name}`,
       columns: [col.name],
-      referencedTable: actualTable,
-      referencedColumns: ["id"],
+      referencedTable: match.actual,
+      referencedColumns: [refCol],
       onUpdate: null,
       onDelete: null,
       origin: "inferred",
