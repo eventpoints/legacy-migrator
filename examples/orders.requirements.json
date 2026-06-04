@@ -1,0 +1,89 @@
+{
+  "schemaVersion": "0.1.0",
+  "repo": {
+    "url": "https://example.invalid/legacy-shop.git",
+    "commit": "0000000000000000000000000000000000000000",
+    "language": "php",
+    "analyzedAt": "2026-06-04T00:00:00.000Z"
+  },
+  "slices": [
+    {
+      "id": "orders",
+      "name": "Orders",
+      "description": "Customer order placement, checkout, and order history.",
+      "status": "extracted",
+      "sourceRefs": [
+        { "file": "application/controllers/Orders.php", "startLine": 1, "endLine": 60 }
+      ],
+      "features": [
+        {
+          "id": "orders.checkout",
+          "name": "Checkout",
+          "description": "Places an order and calculates shipping.",
+          "entrypoints": ["POST /orders/checkout"],
+          "status": "extracted",
+          "sourceRefs": [
+            {
+              "file": "application/controllers/Orders.php",
+              "symbol": "checkout",
+              "startLine": 80,
+              "endLine": 240
+            }
+          ],
+          "rules": [
+            {
+              "id": "orders.checkout.free-shipping",
+              "name": "Free shipping over threshold",
+              "given": ["the cart subtotal is greater than 100.00"],
+              "when": "the customer submits checkout",
+              "then": [
+                "the shipping cost is set to 0.00",
+                "the order total equals the subtotal"
+              ],
+              "dataTouchpoints": [
+                { "table": "orders", "columns": ["subtotal", "shipping", "total"], "access": "write" }
+              ],
+              "sourceRefs": [
+                {
+                  "file": "application/helpers/shipping_helper.php",
+                  "symbol": "calculate_shipping",
+                  "startLine": 10,
+                  "endLine": 45
+                }
+              ],
+              "confidence": 0.82,
+              "status": "extracted",
+              "notes": "Threshold is hard-coded as 100 in the helper; confirm currency assumptions."
+            },
+            {
+              "id": "orders.checkout.persist-order",
+              "name": "Persist order on successful checkout",
+              "given": ["the cart is non-empty", "the customer is authenticated"],
+              "when": "the customer submits checkout",
+              "then": [
+                "a new row is inserted into orders",
+                "each cart line is inserted into order_items",
+                "the cart is emptied"
+              ],
+              "dataTouchpoints": [
+                { "table": "orders", "access": "write" },
+                { "table": "order_items", "access": "write" },
+                { "table": "carts", "columns": ["status"], "access": "read-write" }
+              ],
+              "sourceRefs": [
+                {
+                  "file": "application/models/Order_model.php",
+                  "symbol": "create",
+                  "startLine": 30,
+                  "endLine": 120
+                }
+              ],
+              "confidence": 0.9,
+              "status": "extracted"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

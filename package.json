@@ -1,0 +1,24 @@
+{
+  "name": "legacy-migrator",
+  "version": "0.1.0",
+  "description": "AI-assisted legacy-to-modern migration pipeline, built around a traceable hierarchical requirements artifact.",
+  "type": "module",
+  "private": true,
+  "license": "UNLICENSED",
+  "author": "Kerrial Newham",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "schema:export": "tsx src/schema/export-json-schema.ts",
+    "example:validate": "tsx src/schema/validate.ts examples/orders.requirements.json",
+    "coverage:demo": "tsx src/schema/coverage-demo.ts"
+  },
+  "dependencies": {
+    "zod": "^3.23.8",
+    "zod-to-json-schema": "^3.23.2"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
