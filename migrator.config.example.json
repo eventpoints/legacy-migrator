@@ -1,0 +1,13 @@
+{
+  "database": {
+    "host": "127.0.0.1",
+    "port": 4406,
+    "user": "root",
+    "password": "${MYSQL_PASSWORD}",
+    "database": "your_legacy_db"
+  },
+  "repo": {
+    "path": "/absolute/path/to/legacy/codebase"
+  },
+  "artifactsDir": "artifacts"
+}

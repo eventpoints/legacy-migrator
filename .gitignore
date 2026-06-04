@@ -3,3 +3,9 @@ dist/
 *.log
 .env
 .DS_Store
+
+# Real config can hold credentials — keep it local. Commit the .example instead.
+migrator.config.json
+
+# Generated artifacts (schema dumps, requirements docs, reports).
+artifacts/

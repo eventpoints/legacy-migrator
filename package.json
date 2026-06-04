@@ -11,9 +11,11 @@
     "typecheck": "tsc --noEmit",
     "schema:export": "tsx src/schema/export-json-schema.ts",
     "example:validate": "tsx src/schema/validate.ts examples/orders.requirements.json",
-    "coverage:demo": "tsx src/schema/coverage-demo.ts"
+    "coverage:demo": "tsx src/schema/coverage-demo.ts",
+    "ingest:db": "tsx src/ingest/read-schema.ts"
   },
   "dependencies": {
+    "mysql2": "^3.22.4",
     "zod": "^3.23.8",
     "zod-to-json-schema": "^3.23.2"
   },
